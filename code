@@ -1,0 +1,107 @@
+
+import pandas as pd
+import numpy as np
+from zipfile import ZipFile
+import os
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import TruncatedSVD
+
+
+zip_path = "/archive.zip"
+extract_dir = "/content/ml-100k"
+
+with ZipFile(zip_path, 'r') as zip_ref:
+    zip_ref.extractall("/content")
+
+print("Extracted files:", os.listdir("/content/ml-100k"))
+
+
+ratings = pd.read_csv("/content/ml-100k/u.data",
+                      sep="\t", names=["user_id", "movie_id", "rating", "timestamp"])
+
+movies = pd.read_csv("/content/ml-100k/u.item",
+                     sep="|", encoding="latin-1", usecols=[0,1],
+                     names=["movie_id", "title"], header=None)
+
+
+ratings = ratings.merge(movies, on="movie_id")
+print("Ratings sample:\n", ratings.head())
+
+
+user_item_matrix = ratings.pivot_table(index="user_id", columns="title", values="rating")
+user_item_filled = user_item_matrix.fillna(0)
+
+print("User-Item Matrix shape:", user_item_filled.shape)
+
+
+# User-Based Collaborative Filtering
+user_similarity = cosine_similarity(user_item_filled)
+user_similarity_df = pd.DataFrame(user_similarity, 
+                                  index=user_item_matrix.index, 
+                                  columns=user_item_matrix.index)
+
+def recommend_user_based(user_id, num_recommendations=5):
+    sim_users = user_similarity_df[user_id].sort_values(ascending=False)[1:]  # exclude self
+    top_user = sim_users.index[0]
+    
+    user_ratings = user_item_matrix.loc[user_id]
+    top_user_ratings = user_item_matrix.loc[top_user]
+    
+    recommendations = top_user_ratings[user_ratings.isna()]
+    recommendations = recommendations.dropna().sort_values(ascending=False).head(num_recommendations)
+    return recommendations
+
+print("\nUser-Based Recommendations for User 1:\n", recommend_user_based(1, 5))
+
+
+#Item-Based Collaborative Filtering (Bonus)
+
+item_similarity = cosine_similarity(user_item_filled.T)
+item_similarity_df = pd.DataFrame(item_similarity, 
+                                  index=user_item_matrix.columns, 
+                                  columns=user_item_matrix.columns)
+
+def recommend_item_based(user_id, num_recommendations=5):
+    user_ratings = user_item_matrix.loc[user_id].dropna()
+    scores = {}
+    
+    for movie, rating in user_ratings.items():
+        similar_movies = item_similarity_df[movie].drop(movie)
+        for sim_movie, score in similar_movies.items():
+            if pd.isna(user_item_matrix.loc[user_id, sim_movie]):  # not rated yet
+                scores[sim_movie] = scores.get(sim_movie, 0) + score * rating
+    
+    recommendations = pd.Series(scores).sort_values(ascending=False).head(num_recommendations)
+    return recommendations
+
+print("\nItem-Based Recommendations for User 1:\n", recommend_item_based(1, 5))
+
+
+# Matrix Factorization with SVD (Bonus)
+
+svd = TruncatedSVD(n_components=20, random_state=42)
+latent_matrix = svd.fit_transform(user_item_filled)
+latent_matrix_t = svd.components_
+
+pred_ratings = np.dot(latent_matrix, latent_matrix_t)
+pred_df = pd.DataFrame(pred_ratings, index=user_item_matrix.index, columns=user_item_matrix.columns)
+
+def recommend_svd(user_id, num_recommendations=5):
+    user_predictions = pred_df.loc[user_id]
+    already_rated = user_item_matrix.loc[user_id].dropna().index
+    recommendations = user_predictions.drop(already_rated).sort_values(ascending=False).head(num_recommendations)
+    return recommendations
+
+print("\nSVD Recommendations for User 1:\n", recommend_svd(1, 5))
+
+
+def precision_at_k(recommend_func, user_id, k=5, threshold=3.5):
+    recs = recommend_func(user_id, k)
+    relevant = ratings[(ratings["user_id"] == user_id) & (ratings["rating"] >= threshold)]["title"].values
+    rec_movies = recs.index if isinstance(recs, pd.Series) else recs.keys()
+    hits = len(set(rec_movies) & set(relevant))
+    return hits / k
+
+print("\nPrecision@5 (User-Based) for User 1:", precision_at_k(recommend_user_based, 1, 5))
+print("Precision@5 (Item-Based) for User 1:", precision_at_k(recommend_item_based, 1, 5))
+print("Precision@5 (SVD) for User 1:", precision_at_k(recommend_svd, 1, 5))
